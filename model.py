@@ -8,72 +8,47 @@ import layers
 import argparse
 
 
-def load_images(file_name_list, base_dir, use_augmentation=False):
+def load_images(file_name_list, base_dir, use_augmentation=False, add_eps=False, rotate=-1, resize=[256, 256]):
     images = []
+    ca = []
 
     for file_name in file_name_list:
         fullname = os.path.join(base_dir, file_name).replace("\\", "/")
         img = cv2.imread(fullname)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        for_face = False
-
-        if for_face is False:
-            # For SKC
-            if use_augmentation is True:
-                resized_img = cv2.resize(img, dsize=(512, 520), interpolation=cv2.INTER_CUBIC)
-                resized_img_hd = cv2.resize(img, dsize=(1024, 1040), interpolation=cv2.INTER_CUBIC)
-        else:
-            # For face
-            img = cv2.resize(img, dsize=(128, 128), interpolation=cv2.INTER_CUBIC)
+        # resized_img = cv2.resize(img, dsize=(512, 520), interpolation=cv2.INTER_CUBIC)
+        # resized_img_hd = cv2.resize(img, dsize=(1024, 1040), interpolation=cv2.INTER_CUBIC)
 
         if img is not None:
-            img = np.array(img)
+            #print(fullname)
+            #img = img[4:input_height, 0:input_width]
 
-            if for_face is True:
-                # For face
-                n_img = (img - 128.0) / 128.0
-                images.append(n_img)
+            # Center crop
+            center_x = img_width // 2
+            center_y = img_height // 2
+            img = img[center_y - 48:center_y + 48, center_x - 48:center_x + 48]
 
-                if use_augmentation is True:
-                    n_img = cv2.flip(img, 1)
-                    n_img = (img - 128.0) / 128.0
-                    images.append(n_img)
-            else:
-                img = img[4:260, 0:256]
+            if use_augmentation is True:
+                aug = np.random.randint(low=0, high=4)
 
-                # Center crop
-                center_x = 256 // 2
-                center_y = 256 // 2
-                img = img[center_y-64:center_y+64, center_x-64:center_x+64]
-                n_img = (img - 128.0) / 128.0
-                images.append(n_img)
+                if aug == 0:
+                    img = cv2.flip(img, 1)
+                elif aug == 1:
+                    rotate = np.random.randint(low=0, high=3)
+                    img = cv2.rotate(img, rotate)
+                elif aug == 2:
+                    img = img + np.random.uniform(low=0, high=1, size=img.shape)
 
-                if use_augmentation is True:
-                    n_img = cv2.flip(img, 1)
-                    n_img = (n_img - 128.0) / 128.0
-                    images.append(n_img)
+            #img = cv2.resize(img, dsize=(input_width, input_height), interpolation=cv2.INTER_LINEAR)
+            n_img = img / 255.0
+            images.append(n_img)
+            ca.append(int(file_name[0]))
 
-                    img = np.array(resized_img)
-                    img = img[8:520, 0:512]
-                    center_x = 512 // 2
-                    center_y = 512 // 2
-                    img = img[center_y-64:center_y+64, center_x-64:center_x+64]
-                    n_img = (img - 128.0) / 128.0
-                    images.append(n_img)
-
-                    img = np.array(resized_img_hd)
-                    img = img[16:1040, 0:1024]
-                    center_x = 1024 // 2
-                    center_y = 1024 // 2
-                    img = img[center_y - 64:center_y + 64, center_x - 64:center_x + 64]
-                    n_img = (img - 128.0) / 128.0
-                    images.append(n_img)
-
-    return np.array(images)
+    return np.array(images), np.array(ca)
 
 
-def generator(latent, activation='swish', scope='generator_network', norm='layer', b_train=False, use_upsample=False):
+def generator(latent, category, activation='swish', scope='generator_network', norm='layer', b_train=False, use_upsample=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         if activation == 'swish':
             act_func = util.swish
@@ -84,64 +59,50 @@ def generator(latent, activation='swish', scope='generator_network', norm='layer
         else:
             act_func = tf.nn.sigmoid
 
-        block_depth = dense_block_depth * 16
+        print(scope + ' Input: ' + str(latent.get_shape().as_list()))
 
-        l = latent
+        l = tf.concat([latent, category], axis=-1)
+        print(' Concat category: ' + str(l.get_shape().as_list()))
+        l = layers.fc(l, 48 * 48 * num_channel, non_linear_fn=act_func, scope='fc1', use_bias=False)
+        print(' FC1: ' + str(l.get_shape().as_list()))
 
-        print('Generator Input: ' + str(latent.get_shape().as_list()))
-        transform_channel = latent.get_shape().as_list()[-1] // 16
+        l = tf.reshape(l, shape=[-1, 48, 48, num_channel])
 
-        l = tf.reshape(l, shape=[-1, 4, 4, transform_channel])
-
-        block_depth = block_depth * 2
-        l = layers.conv(l, scope='trans_conv', filter_dims=[1, 1, block_depth], stride_dims=[1, 1], non_linear_fn=None)
-        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='trans_norm_1')
+        # Init Stage. Coordinated convolution: Embed explicit positional information
+        block_depth = unit_block_depth * 2
+        l = layers.conv(l, scope='init', filter_dims=[3, 3, block_depth], stride_dims=[1, 1],
+                        non_linear_fn=None, bias=False)
+        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm_init')
         l = act_func(l)
-        l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2,
-                                      act_func=act_func, norm=norm, b_train=b_train, scope='trans_0')
 
-        num_iter = input_width // 4
-        num_iter = int(np.sqrt(num_iter))
-
-        for i in range(num_iter):
+        upsample_num_itr = 1
+        for i in range(upsample_num_itr):
+            # ESPCN upsample
             block_depth = block_depth // 2
+            l = layers.conv(l, scope='espcn_' + str(i), filter_dims=[3, 3, block_depth * 2 * 2],
+                            stride_dims=[1, 1], non_linear_fn=None)
+            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='espcn_norm_' + str(i))
+            l = act_func(l)
+            l = tf.nn.depth_to_space(l, 2)
 
-            if use_upsample is True:
-                w = l.get_shape().as_list()[2]
-                h = l.get_shape().as_list()[1]
-                #l = tf.image.resize_bilinear(l, (2 * h, 2 * w))
-                l = tf.image.resize_bicubic(l, (2 * h, 2 * w))
-                #l = tf.image.resize_nearest_neighbor(l, (2 * h, 2 * w))
-                print('Upsampling ' + str(i) + ': ' + str(l.get_shape().as_list()))
-                l = layers.conv(l, scope='up_' + str(i), filter_dims=[3, 3, block_depth], stride_dims=[1, 1], non_linear_fn=None)
-                l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='up_norm_' + str(i))
-                l = act_func(l)
+        # Bottleneck stage
+        for i in range(bottleneck_depth):
+            print(' Bottleneck Block : ' + str(l.get_shape().as_list()))
+            l = layers.add_se_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
+                                             norm=norm, b_train=b_train, use_residual=True, use_dilation=False,
+                                             scope='bt_block_' + str(i))
 
-                for j in range(3):
-                    l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2,
-                                                  act_func=act_func, norm=norm, b_train=b_train, use_dilation=False,
-                                                  scope='block_' + str(i) + '_' + str(j))
-            else:
-                l = layers.deconv(l, b_size=l.get_shape().as_list()[0], scope='deconv_' + str(i), filter_dims=[3, 3, block_depth],
-                                  stride_dims=[2, 2], padding='SAME', non_linear_fn=None)
-                print('Deconvolution ' + str(i) + ': ' + str(l.get_shape().as_list()))
-                l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='deconv_norm_' + str(i))
-                l = act_func(l)
+        # Transform to input channels
+        l = layers.conv(l, scope='last', filter_dims=[3, 3, num_channel], stride_dims=[1, 1],
+                        non_linear_fn=tf.nn.sigmoid,
+                        bias=False)
 
-        if use_upsample is False:
-            for i in range(4):
-                l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2,
-                                              act_func=act_func, norm=norm, b_train=b_train, use_dilation=False,
-                                              scope='tr_block_' + str(i))
-
-        l = layers.conv(l, scope='last', filter_dims=[1, 1, num_channel], stride_dims=[1, 1], non_linear_fn=tf.nn.tanh, bias=False)
-
-        print('Generator Final: ' + str(l.get_shape().as_list()))
+    print('Generator Output: ' + str(l.get_shape().as_list()))
 
     return l
 
 
-def discriminator(x, activation='relu', scope='discriminator_network', norm='layer', b_train=False, use_patch=False):
+def discriminator(x, category, activation='relu', scope='discriminator_network', norm='layer', b_train=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         if activation == 'swish':
             act_func = util.swish
@@ -152,128 +113,41 @@ def discriminator(x, activation='relu', scope='discriminator_network', norm='lay
         else:
             act_func = tf.nn.sigmoid
 
-        print('Encoder Input: ' + str(x.get_shape().as_list()))
-        block_depth = dense_block_depth
+        print(scope + ' Input: ' + str(x.get_shape().as_list()))
 
-        #x = tf.slice(x, [0, 32, 32, 0], [-1, 64, 64, -1])
+        block_depth = unit_block_depth
+        norm_func = norm
+        b, h, w, c = x.get_shape().as_list()
 
-        l = layers.conv(x, scope='conv0', filter_dims=[3, 3, block_depth], stride_dims=[1, 1],
-                        non_linear_fn=None, bias=False)
-        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm0')
+        cat = tf.reshape(category, shape=[-1, 1, 1, num_class])
+        l = tf.concat([x, cat * tf.ones([b, h, w, num_class])], -1)
+        print(scope + 'Concat Input: ' + str(l.get_shape().as_list()))
+
+        l = layers.conv(l, scope='init', filter_dims=[3, 3, block_depth], stride_dims=[1, 1],
+                        non_linear_fn=None, bias=False, padding='SAME')
+        l = layers.conv_normalize(l, norm=norm_func, b_train=b_train, scope='norm_init')
         l = act_func(l)
 
-        if use_patch is True:
-            print('Discriminator Block 0: ' + str(l.get_shape().as_list()))
+        num_iter = 3
 
-            l = layers.add_residual_dense_block(l, filter_dims=[3, 3, block_depth], num_layers=2,
-                                                act_func=act_func, norm=norm, b_train=b_train, scope='dense_block_1')
-
+        for i in range(num_iter):
+            l = layers.add_se_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
+                                             norm=norm_func, b_train=b_train, scope='disc_block_1_' + str(i))
             block_depth = block_depth * 2
-
-            l = layers.conv(l, scope='tr1', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm1')
+            l = layers.conv(l, scope='dn_' + str(i), filter_dims=[3, 3, block_depth], stride_dims=[2, 2],
+                            non_linear_fn=None, bias=False)
+            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='dn_norm_' + str(i))
             l = act_func(l)
 
-            print('Discriminator Block 1: ' + str(l.get_shape().as_list()))
+        print('Discriminator Block : ' + str(l.get_shape().as_list()))
 
-            for i in range(2):
-                l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                              norm=norm, b_train=b_train, scope='res_block_1_' + str(i))
+        last_layer = l
+        logit = layers.conv(last_layer, scope='conv_pred', filter_dims=[3, 3, 1], stride_dims=[1, 1],
+                            non_linear_fn=None, bias=False)
 
-            # l = layers.self_attention(l, block_depth)
+        print('Discriminator Logit Dims: ' + str(logit.get_shape().as_list()))
 
-            block_depth = block_depth * 2
-
-            l = layers.conv(l, scope='tr2', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm2')
-            l = act_func(l)
-
-            print('Discriminator Block 2: ' + str(l.get_shape().as_list()))
-
-            l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                          norm=norm, b_train=b_train, use_dilation=False,
-                                          scope='res_block_2_' + str(i))
-            block_depth = block_depth * 2
-
-            l = layers.conv(l, scope='tr3', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm3')
-            l = act_func(l)
-
-            print('Discriminator Block 3: ' + str(l.get_shape().as_list()))
-            last_layer = l
-            feature = layers.global_avg_pool(last_layer, output_length=representation_dim // 8, use_bias=False,
-                                             scope='gp')
-            print('Discriminator GP Dims: ' + str(feature.get_shape().as_list()))
-
-            logit = layers.global_avg_pool(last_layer, output_length=1, use_bias=False,
-                                             scope='gp_logit')
-            print('Discriminator Logit Dims: ' + str(logit.get_shape().as_list()))
-        else:
-
-            print('Discriminator Block 0: ' + str(l.get_shape().as_list()))
-
-            l = layers.add_residual_dense_block(l, filter_dims=[3, 3, block_depth], num_layers=2,
-                                                act_func=act_func, norm=norm, b_train=b_train, scope='dense_block_1')
-
-            block_depth = block_depth * 2
-
-            l = layers.conv(l, scope='tr1', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm1')
-            l = act_func(l)
-
-            print('Discriminator Block 1: ' + str(l.get_shape().as_list()))
-
-            for i in range(2):
-                l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                              norm=norm, b_train=b_train, scope='res_block_1_' + str(i))
-
-            # l = layers.self_attention(l, block_depth)
-
-            block_depth = block_depth * 2
-
-            l = layers.conv(l, scope='tr2', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm2')
-            l = act_func(l)
-
-            print('Discriminator Block 2: ' + str(l.get_shape().as_list()))
-
-            for i in range(2):
-                l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                              norm=norm, b_train=b_train, use_dilation=False, scope='res_block_2_' + str(i))
-            anchor = l
-            block_depth = block_depth * 2
-
-            # [8 x 8]
-            l = layers.conv(l, scope='tr3', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm3')
-            l = act_func(l)
-
-            print('Discriminator Block 3: ' + str(l.get_shape().as_list()))
-
-            for i in range(2):
-                l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                              norm=norm, b_train=b_train, use_dilation=False, scope='res_block_3_' + str(i))
-
-            # [4 x 4]
-            block_depth = block_depth * 2
-            l = layers.conv(l, scope='tr4', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm4')
-            l = act_func(l)
-
-            print('Discriminator Block 4: ' + str(l.get_shape().as_list()))
-            l = layers.self_attention(l, block_depth, act_func=act_func)
-            for i in range(2):
-                l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                              norm=norm, b_train=b_train, use_dilation=False, scope='res_block_4_' + str(i))
-
-            last_layer = l
-            feature = layers.global_avg_pool(last_layer, output_length=representation_dim // 8, use_bias=False, scope='gp')
-
-            print('Discriminator GP Dims: ' + str(feature.get_shape().as_list()))
-
-            logit = layers.fc(feature, 1, non_linear_fn=None, scope='flat')
-
-    return feature, logit
+    return last_layer, logit
 
 
 def encoder(x, activation='relu', scope='encoder', norm='layer', b_train=False):
@@ -407,8 +281,8 @@ def get_feature_matching_loss(value, target, type='l1', gamma=1.0):
     elif type == 'l1':
         loss = tf.reduce_mean(tf.abs(tf.subtract(target, value)))
     elif type == 'l2':
-        #loss = tf.reduce_mean(tf.square(tf.subtract(target, value)))
-        loss = tf.reduce_mean(tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(target, value)))))
+        loss = tf.reduce_mean(tf.square(tf.subtract(target, value)))
+        #loss = tf.reduce_mean(tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(target, value)))))
     return gamma * loss
 
 
@@ -431,6 +305,8 @@ def get_discriminator_loss(real, fake, type='wgan', gamma=1.0):
         d_loss_real = tf.reduce_mean(tf.nn.relu(1.0 - real))
         d_loss_fake = tf.reduce_mean(tf.nn.relu(1.0 + fake))
         return gamma * (d_loss_fake + d_loss_real), d_loss_real, d_loss_fake
+    elif type == 'ls':
+        return tf.reduce_mean((real - fake) ** 2)
 
 
 def get_residual_loss(value, target, type='l1', gamma=1.0):
@@ -461,35 +337,45 @@ def get_diff_loss(anchor, positive, negative):
 
 
 def get_gradient_loss(img1, img2):
-    image_a = img1 #tf.expand_dims(img1, axis=0)
-    image_b = img2 #tf.expand_dims(img2, axis=0)
+    # Laplacian second derivation
+    image_a = img1  # tf.expand_dims(img1, axis=0)
+    image_b = img2  # tf.expand_dims(img2, axis=0)
 
     dx_a, dy_a = tf.image.image_gradients(image_a)
     dx_b, dy_b = tf.image.image_gradients(image_b)
 
-    v_a = tf.reduce_mean(tf.image.total_variation(image_a))
-    v_b = tf.reduce_mean(tf.image.total_variation(image_b))
+    '''
+    d2x_ax, d2y_ax = tf.image.image_gradients(dx_a)
+    d2x_bx, d2y_bx = tf.image.image_gradients(dx_b)
+    d2x_ay, d2y_ay = tf.image.image_gradients(dy_a)
+    d2x_by, d2y_by = tf.image.image_gradients(dy_b)
 
-    #loss = tf.abs(tf.subtract(v_a, v_b))
-    loss = tf.reduce_mean(tf.abs(tf.subtract(dx_a, dx_b))) + tf.reduce_mean(tf.abs(tf.subtract(dy_a, dy_b)))
+    loss1 = tf.reduce_mean(tf.abs(tf.subtract(d2x_ax, d2x_bx))) + tf.reduce_mean(tf.abs(tf.subtract(d2y_ax, d2y_bx)))
+    loss2 = tf.reduce_mean(tf.abs(tf.subtract(d2x_ay, d2x_by))) + tf.reduce_mean(tf.abs(tf.subtract(d2y_ay, d2y_by)))
+    '''
+    loss1 = tf.reduce_mean(tf.abs(tf.subtract(dx_a, dx_b)))
+    loss2 = tf.reduce_mean(tf.abs(tf.subtract(dy_a, dy_b))) 
 
-    return loss
+    return (loss1+loss2)
 
 
 def generate_sample_z(low, high, num_samples, sample_length, b_uniform=True):
-    if b_uniform is True:
-        z = np.random.uniform(low=low, high=high, size=[num_samples, sample_length])
-    else:
-        z = np.random.normal(low, high, size=[num_samples, sample_length])
+    samples = []
 
-    return z
+    for i in range(num_samples):
+        if b_uniform is True:
+            noise = np.random.uniform(low=low, high=high, size=[sample_length])
+        else:
+            noise = np.random.normal(low, high, size=[sample_length])
+        samples.append(noise)
+
+    return np.array(samples)
 
 
 def make_multi_modal_noise(num_mode=8):
     size = representation_dim // num_mode
 
-    for i in range(batch_size):
-        noise = tf.random_normal(shape=[batch_size, size], mean=0.0, stddev=1.0, dtype=tf.float32)
+    noise = tf.random_normal(shape=[batch_size, size], mean=0.0, stddev=1.0, dtype=tf.float32)
 
     for i in range(num_mode-1):
         n = tf.random_normal(shape=[batch_size, size], mean=0.0, stddev=1.0, dtype=tf.float32)
@@ -560,7 +446,7 @@ def train_encoder(model_path):
 
             for start, end in training_batch:
                 imgs = load_images(trX[start:end], base_dir=train_data, use_augmentation=False)
-                imgs = np.expand_dims(imgs, axis=3)
+                #imgs = np.expand_dims(imgs, axis=3)
 
                 _, e_loss, decoded_images = sess.run([encoder_optimizer, total_loss, fake_X], feed_dict={X: imgs, b_train: True})
 
@@ -597,6 +483,8 @@ def train_gan(model_path):
     with tf.device('/device:CPU:0'):
         X = tf.placeholder(tf.float32, [batch_size, input_height, input_width, num_channel])
         Z = tf.placeholder(tf.float32, [batch_size, representation_dim])
+        C = tf.placeholder(tf.float32, [batch_size, num_class])
+        LR = tf.placeholder(tf.float32, None)  # Learning Rate
 
     b_train = tf.placeholder(tf.bool)
 
@@ -605,35 +493,39 @@ def train_gan(model_path):
     config.gpu_options.allow_growth = True
 
     # Content discriminator
-    fake_X = generator(Z, activation='swish', norm='instance', b_train=b_train, scope='generator', use_upsample=True)
-    # Adversarial Discriminator
-    feature_fake, logit_fake = discriminator(fake_X, activation='swish', norm='instance', b_train=b_train, scope='discriminator', use_patch=False)
-    feature_real, logit_real = discriminator(X, activation='swish', norm='instance', b_train=b_train, scope='discriminator', use_patch=False)
+    fake_X = generator(Z, C, activation='relu', norm='instance', b_train=b_train, scope='generator', use_upsample=True)
+    augmented_fake_X = util.random_augments(fake_X)
 
-    feature_loss = get_residual_loss(feature_real, feature_fake, type='l2')
-    disc_loss, disc_loss_real, disc_loss_fake = get_discriminator_loss(logit_real, logit_fake, type='wgan')
-    gen_loss = -tf.reduce_mean(logit_fake)
+    # Adversarial Discriminator
+    augmented_X = util.random_augments(X)
+    feature_real, logit_real = discriminator(augmented_X, C, activation='relu', norm='instance', b_train=b_train, scope='discriminator')
+    feature_fake, logit_fake = discriminator(augmented_fake_X, C, activation='relu', norm='instance', b_train=b_train, scope='discriminator')
+
+    grad_loss = get_gradient_loss(X, fake_X)
+    feature_loss = get_feature_matching_loss(feature_real, feature_fake, type='l2')
+
+    #disc_loss, disc_loss_real, disc_loss_fake = get_discriminator_loss(logit_real, logit_fake, type='wgan')
+    disc_loss = get_discriminator_loss(logit_real, tf.ones_like(logit_real), type='ls') + \
+                get_discriminator_loss(logit_fake, tf.zeros_like(logit_fake), type='ls')
+
+    #gen_loss = -tf.reduce_mean(logit_fake)
+    gen_loss = get_discriminator_loss(logit_fake, tf.ones_like(logit_fake), type='ls') # + feature_loss #+ 0.1 * grad_loss
+    #gen_loss = feature_loss
 
     disc_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator')
-    # Alert: Clip range is critical to WGAN.
-    disc_weight_clip = [p.assign(tf.clip_by_value(p, -0.05, 0.05)) for p in disc_vars]
+    disc_l2_regularizer = tf.add_n([tf.nn.l2_loss(v) for v in disc_vars if 'bias' not in v.name])
+    weight_decay = 1e-5
+    disc_loss = disc_loss + weight_decay * disc_l2_regularizer
+
     generator_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
+    gen_l2_regularizer = tf.add_n([tf.nn.l2_loss(v) for v in generator_vars if 'bias' not in v.name])
+    gen_loss = gen_loss + weight_decay * gen_l2_regularizer
 
-    alpha = 1.0
-
-    # WGAN GP
-    eps = tf.random_uniform([batch_size, input_height, input_width, num_channel], minval=0.0, maxval=1.0)
-    gp_input = eps * X + (1.0 - eps) * fake_X
-    _, gp_output = discriminator(gp_input, activation='swish', norm='instance', b_train=b_train, scope='discriminator', use_patch=False)
-    gp_grad = tf.gradients(gp_output, [gp_input])[0]
-    gp_grad_norm = tf.sqrt(tf.reduce_mean(gp_grad ** 2, axis=1), name="gp_grad_norm")
-    gp_grad_pen = 10 * tf.reduce_mean((gp_grad_norm - 1) ** 2)
-
-    feature_loss = alpha * feature_loss
-    #disc_loss = disc_loss + gp_grad_pen
-
-    disc_optimizer = tf.train.RMSPropOptimizer(learning_rate=5e-5).minimize(disc_loss, var_list=disc_vars)
-    gen_optimizer = tf.train.RMSPropOptimizer(learning_rate=5e-5).minimize(gen_loss, var_list=generator_vars)
+    disc_optimizer = tf.train.RMSPropOptimizer(learning_rate=LR).minimize(disc_loss, var_list=disc_vars)
+    gen_optimizer = tf.train.RMSPropOptimizer(learning_rate=LR).minimize(gen_loss, var_list=generator_vars)
+    #disc_optimizer = tf.train.AdamOptimizer(learning_rate=LR).minimize(disc_loss, var_list=disc_vars)
+    #gen_optimizer = tf.train.AdamOptimizer(learning_rate=LR).minimize(gen_loss, var_list=generator_vars)
+    image_pool = util.ImagePool(maxsize=30, threshold=0.5)
 
     # Launch the graph in a session
     with tf.Session(config=config) as sess:
@@ -650,7 +542,13 @@ def train_gan(model_path):
         print('Number of Training Images: ' + str(len(trX)))
         num_augmentations = 1  # How many augmentations per 1 sample
         file_batch_size = batch_size // num_augmentations
-        num_critic = 5
+        num_critic = 3
+        learning_rate = 2e-4
+
+        category_index = np.eye(num_class)[np.arange(num_class)]
+
+        total_input_size = len(trX) // batch_size
+        total_steps = (total_input_size * num_epoch)
 
         for e in range(num_epoch):
             trX = shuffle(trX)
@@ -658,26 +556,43 @@ def train_gan(model_path):
             itr = 0
 
             for start, end in training_batch:
-                imgs = load_images(trX[start:end], base_dir=train_data, use_augmentation=False)
-                imgs = np.expand_dims(imgs, axis=3)
+                imgs, cats = load_images(trX[start:end], base_dir=train_data)
+                imgs = np.expand_dims(imgs, axis=-1)
+                #print(imgs.shape)
 
-                noise = generate_sample_z(low=-1.0, high=1.0, num_samples=batch_size, sample_length=representation_dim,
-                                          b_uniform=True)
-                _, d_loss, _ = sess.run([disc_optimizer, disc_loss, disc_weight_clip], feed_dict={X: imgs, Z: noise, b_train: True})
+                categories = category_index[cats]
+                noise = generate_sample_z(low=0, high=1.0, num_samples=batch_size,
+                                          sample_length=representation_dim,
+                                          b_uniform=False)
+
+                cur_steps = (e * total_input_size) + itr + 1.0
+
+                lr = learning_rate * np.cos((np.pi * 7 / 16) * (cur_steps / total_steps))
+
+                _, d_loss = sess.run([disc_optimizer, disc_loss],
+                                     feed_dict={Z: noise,
+                                                X: imgs,
+                                                C: categories,
+                                                LR: lr,
+                                                b_train: True})
 
                 if itr % num_critic == 0:
-                    noise = generate_sample_z(low=-1.0, high=1.0, num_samples=batch_size,
-                                              sample_length=representation_dim,
-                                              b_uniform=True)
-                    _, g_loss = sess.run([gen_optimizer, gen_loss], feed_dict={Z: noise,  b_train: True})
-                    # _, f_loss = sess.run([feature_optimizer, feature_loss], feed_dict={X: imgs, Z: noise, b_train: True})
-                    decoded_images = sess.run([fake_X], feed_dict={Z: noise, b_train: True})
+                    _, g_loss = sess.run([gen_optimizer, gen_loss],
+                                         feed_dict={Z: noise,
+                                                    X: imgs,
+                                                    C: categories,
+                                                    b_train: True, LR: lr})
+
+                    decoded_images = sess.run([fake_X], feed_dict={Z: noise, C: categories, b_train: True})
                     print('epoch: ' + str(e) + ', discriminator: ' + str(d_loss) +
                           ', generator: ' + str(g_loss))
 
                     decoded_images = np.squeeze(decoded_images)
-                    cv2.imwrite('imgs/' + trX[start], (decoded_images[3] * 128.0) + 128.0)
-                    #cv2.imwrite('imgs/org_' + trX[start], imgs[3] * 255)
+                    #imgs = np.squeeze(imgs)
+
+                    for i in range(batch_size):
+                        cv2.imwrite('imgs/gen_' + trX[start+i], decoded_images[i] * 255.0)
+                        #cv2.imwrite('imgs/' + trX[start+i], imgs[i] * 255.0)
 
                 itr += 1
 
@@ -745,7 +660,7 @@ def test(model_path):
 
         for start, end in training_batch:
             imgs = load_images(trX[start:end], base_dir=test_data)
-            imgs = np.expand_dims(imgs, axis=3)
+            #imgs = np.expand_dims(imgs, axis=3)
             #print('Image batch Shape: ' + str(imgs.shape))
             aae_loss = sess.run([total_loss], feed_dict={X: imgs, b_train: False})
 
@@ -790,21 +705,23 @@ if __name__ == '__main__':
     test_data = args.test_data
     model_path = args.model_path
 
-    dense_block_depth = 64
-
-    # Bottle neck(depth narrow down) depth. See Residual Dense Block and Residual Block.
-    bottleneck_depth = 32
-    batch_size = 16
-    representation_dim = 128
-
-    img_width = 256
-    img_height = 256
-    input_width = 128
-    input_height = 128
+    img_width = 128
+    img_height = 128
+    input_width = 96
+    input_height = 96
     num_channel = 1
 
+    unit_block_depth = 64
+    dense_block_depth = 32
+
+    # Bottle neck(depth narrow down) depth. See Residual Dense Block and Residual Block.
+    bottleneck_depth = 12
+    batch_size = 32
+    representation_dim = 1024
+
     test_size = 100
-    num_epoch = 30000
+    num_epoch = 300000
+    num_class = 9
 
     if args.mode == 'train_gan':
         train_gan(model_path)

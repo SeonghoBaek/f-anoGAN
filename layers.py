@@ -490,30 +490,20 @@ def layer_norm(x, scope="layer_norm", alpha_start=1.0, bias_start=0.0):
 def instance_norm(x, scope="instance_norm", alpha_start=1.0, bias_start=0.0, num_grp=8):
     with tf.variable_scope(scope):
         input_dims = x.get_shape().as_list()
-        #print('DIM: ' + str(x.get_shape().as_list()))
-        B = input_dims[0]
         h = input_dims[1]
         w = input_dims[2]
         c = input_dims[3]
-
-        g_c = c // num_grp
-        alpha = tf.get_variable('alpha', shape=[num_grp*g_c], dtype=tf.float32,
-                                initializer=tf.random_normal_initializer(alpha_start, 0.02, dtype=tf.float32))
-        bias = tf.get_variable('bias', [num_grp*g_c],
-                               initializer=tf.constant_initializer(bias_start), dtype=tf.float32)
-        l = tf.reshape(x, shape=[-1, h, w, num_grp, g_c])
-        mean, variance = tf.nn.moments(l, axes=[1, 2, 4], keep_dims=True)
-        #print('MEAN: ' + str(mean.get_shape().as_list()))
-        mean = tf.tile(mean, [1, 1, 1, 1, g_c])
-        variance = tf.tile(variance, [1, 1, 1, 1, g_c])
-        #print('MEAN: ' + str(mean.get_shape().as_list()))
-        instance_mean = tf.reshape(mean, shape=[-1, 1, 1, c])
-        instance_variance = tf.reshape(variance, shape=[-1, 1, 1, c])
-        #scale = tf.reshape(alpha, shape=[num_grp*g_c])
-        #shift = tf.reshape(bias, shape=[num_grp*g_c])
         eps = 1e-5
-        inv = tf.rsqrt(instance_variance + eps)
-        y = alpha * ((x - instance_mean)*inv) + bias
+        g_c = c // num_grp
+        x = tf.reshape(x, shape=[-1, num_grp, g_c, h, w])
+        mean, var = tf.nn.moments(x, [2, 3, 4], keep_dims=True)
+        alpha = tf.get_variable('alpha', shape=[1, 1, 1, num_grp*g_c], dtype=tf.float32,
+                                initializer=tf.random_normal_initializer(alpha_start, 0.02, dtype=tf.float32))
+        bias = tf.get_variable('bias', [1, 1, 1, num_grp*g_c],
+                               initializer=tf.constant_initializer(bias_start), dtype=tf.float32)
+        x = (x - mean) * tf.rsqrt(var + eps)
+        x = tf.reshape(x, [-1, h, w, c])
+        y = alpha * x + bias
 
     return y
 

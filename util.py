@@ -697,7 +697,7 @@ def random_augment_brightness_constrast(images, probability=0.2, seed=None):
 
 
 def random_adjust_brightness(image,
-                             max_delta=0.2,
+                             max_delta=0.05,
                              probability=0.5,
                              seed=None):
   """Randomly adjusts brightness.
@@ -727,8 +727,8 @@ def random_adjust_brightness(image,
 
 
 def random_adjust_contrast(image,
-                           min_delta=0.8,
-                           max_delta=1.25,
+                           min_delta=0.95,
+                           max_delta=1.05,
                            probability=0.5,
                            seed=None):
     """Randomly adjusts contrast.

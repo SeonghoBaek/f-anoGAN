@@ -8,47 +8,75 @@ import layers
 import argparse
 
 
-def load_images(file_name_list, base_dir, use_augmentation=False, add_eps=False, rotate=-1, resize=[256, 256]):
+def prepare_samples(base_dir, size_per_class):
+    subdir_list = os.listdir(base_dir)
+
+    classes = []
+    files = []
+    class_label = 0
+
+    for subdir in subdir_list:
+        class_dir = os.path.join(train_data, subdir).replace("\\", "/")
+
+        files_in_class = os.listdir(class_dir)
+        size = len(files_in_class)
+
+        if size == 0:
+            continue
+
+        file_list = []
+        num_itr = 0
+
+        if size < size_per_class:
+            num_itr = (size_per_class / size)
+
+        residual = size_per_class - num_itr * size
+
+        for i in range(num_itr):
+            file_list = file_list + files_in_class
+
+        file_list = file_list + files_in_class[:residual]
+
+        for file in file_list:
+            fullname_file = os.path.join(subdir, file).replace("\\", "/")
+            files.append(fullname_file)
+            classes.append(class_label)
+
+        class_label = class_label + 1
+
+    return files, classes
+
+
+def load_images(file_name_list, base_dir, b_grayscale=False):
     images = []
-    ca = []
 
     for file_name in file_name_list:
         fullname = os.path.join(base_dir, file_name).replace("\\", "/")
-        img = cv2.imread(fullname)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # resized_img = cv2.resize(img, dsize=(512, 520), interpolation=cv2.INTER_CUBIC)
-        # resized_img_hd = cv2.resize(img, dsize=(1024, 1040), interpolation=cv2.INTER_CUBIC)
+        img = cv2.imread(fullname)
+
+        if b_grayscale is True:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         if img is not None:
-            #print(fullname)
-            #img = img[4:input_height, 0:input_width]
-
+            offset = input_width // 2
             # Center crop
             center_x = img_width // 2
-            center_y = img_height // 2
-            img = img[center_y - 48:center_y + 48, center_x - 48:center_x + 48]
-
-            if use_augmentation is True:
-                aug = np.random.randint(low=0, high=4)
-
-                if aug == 0:
-                    img = cv2.flip(img, 1)
-                elif aug == 1:
-                    rotate = np.random.randint(low=0, high=3)
-                    img = cv2.rotate(img, rotate)
-                elif aug == 2:
-                    img = img + np.random.uniform(low=0, high=1, size=img.shape)
-
-            #img = cv2.resize(img, dsize=(input_width, input_height), interpolation=cv2.INTER_LINEAR)
-            n_img = img / 255.0
+            center_y = img_height // 2 + 4
+            img = img[center_y - offset:center_y + offset, center_x - offset:center_x + offset]
+            img = img * 1.0
+            n_img = (img - 127.5) / 127.5
             images.append(n_img)
-            ca.append(int(file_name[0]))
 
-    return np.array(images), np.array(ca)
+    images = np.array(images)
+
+    if b_grayscale is True:
+        images = np.expand_dims(images, axis=-1)
+
+    return images
 
 
-def generator(latent, category, activation='swish', scope='generator_network', norm='layer', b_train=False, use_upsample=False):
+def generator(latent, category, activation='swish', scope='generator_network', norm='layer', b_train=False):
     with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
         if activation == 'swish':
             act_func = util.swish
@@ -63,38 +91,38 @@ def generator(latent, category, activation='swish', scope='generator_network', n
 
         l = tf.concat([latent, category], axis=-1)
         print(' Concat category: ' + str(l.get_shape().as_list()))
-        l = layers.fc(l, 48 * 48 * num_channel, non_linear_fn=act_func, scope='fc1', use_bias=False)
+        l = layers.fc(l, 6 * 6 * unit_block_depth*2, non_linear_fn=act_func, scope='fc1', use_bias=False)
         print(' FC1: ' + str(l.get_shape().as_list()))
 
-        l = tf.reshape(l, shape=[-1, 48, 48, num_channel])
+        l = tf.reshape(l, shape=[-1, 6, 6, unit_block_depth*2])
 
         # Init Stage. Coordinated convolution: Embed explicit positional information
-        block_depth = unit_block_depth * 2
+        block_depth = unit_block_depth * 16
         l = layers.conv(l, scope='init', filter_dims=[3, 3, block_depth], stride_dims=[1, 1],
                         non_linear_fn=None, bias=False)
         l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm_init')
         l = act_func(l)
 
-        upsample_num_itr = 1
+        upsample_num_itr = 4
         for i in range(upsample_num_itr):
             # ESPCN upsample
             block_depth = block_depth // 2
-            l = layers.conv(l, scope='espcn_' + str(i), filter_dims=[3, 3, block_depth * 2 * 2],
+            l = layers.conv(l, scope='upsample_' + str(i), filter_dims=[3, 3, block_depth * 2 * 2],
                             stride_dims=[1, 1], non_linear_fn=None)
-            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='espcn_norm_' + str(i))
+            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='upsample_norm_' + str(i))
             l = act_func(l)
             l = tf.nn.depth_to_space(l, 2)
+            print(' Upsample Block : ' + str(l.get_shape().as_list()))
 
         # Bottleneck stage
         for i in range(bottleneck_depth):
             print(' Bottleneck Block : ' + str(l.get_shape().as_list()))
             l = layers.add_se_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                             norm=norm, b_train=b_train, use_residual=True, use_dilation=False,
-                                             scope='bt_block_' + str(i))
+                                             norm=norm, b_train=b_train, scope='bt_block_' + str(i))
 
         # Transform to input channels
         l = layers.conv(l, scope='last', filter_dims=[3, 3, num_channel], stride_dims=[1, 1],
-                        non_linear_fn=tf.nn.sigmoid,
+                        non_linear_fn=tf.nn.tanh,
                         bias=False)
 
     print('Generator Output: ' + str(l.get_shape().as_list()))
@@ -128,7 +156,7 @@ def discriminator(x, category, activation='relu', scope='discriminator_network',
         l = layers.conv_normalize(l, norm=norm_func, b_train=b_train, scope='norm_init')
         l = act_func(l)
 
-        num_iter = 3
+        num_iter = 4
 
         for i in range(num_iter):
             l = layers.add_se_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
@@ -161,115 +189,38 @@ def encoder(x, activation='relu', scope='encoder', norm='layer', b_train=False):
         else:
             act_func = tf.nn.sigmoid
 
-        print('Encoder Input: ' + str(x.get_shape().as_list()))
-        block_depth = dense_block_depth
+        num_encoder_feature_blocks = 5
+        num_encoder_bt_blocks = 4
 
-        # [128 x 128]
+        print('Encoder Input: ' + str(x.get_shape().as_list()))
+        block_depth = unit_block_depth
+
         l = layers.conv(x, scope='conv0', filter_dims=[3, 3, block_depth], stride_dims=[1, 1],
                         non_linear_fn=None, bias=False)
         l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm0')
         l = act_func(l)
 
-        print('Encoder Block 0: ' + str(l.get_shape().as_list()))
+        print('Encoder Block: ' + str(l.get_shape().as_list()))
 
-        l = layers.add_residual_dense_block(l, filter_dims=[3, 3, block_depth], num_layers=2,
-                                            act_func=act_func, norm=norm, b_train=b_train, scope='dense_block_1')
+        for i in range(num_encoder_bt_blocks):
+            l = layers.add_se_residual_block(l,  filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
+                                             norm=norm, b_train=b_train, scope='res_block_' + str(i))
 
-        block_depth = block_depth * 2
-
-        # [64 x 64]
-        l = layers.conv(l, scope='tr1', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm1')
-        l = act_func(l)
-
-        print('Encoder Block 1: ' + str(l.get_shape().as_list()))
-
-        for i in range(2):
-            l = layers.add_residual_block(l,  filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                          norm=norm, b_train=b_train, scope='res_block_1_' + str(i))
-
-        block_depth = block_depth * 2
-
-        # [32 x 32]
-        l = layers.conv(l, scope='tr2', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm2')
-        l = act_func(l)
-
-        print('Encoder Block 2: ' + str(l.get_shape().as_list()))
-
-        for i in range(2):
-            l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                          norm=norm, b_train=b_train, use_dilation=False, scope='res_block_2_' + str(i))
-        block_depth = block_depth * 2
-
-        # [16 x 16]
-        l = layers.conv(l, scope='tr3', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm3')
-        l = act_func(l)
-
-        print('Encoder Block 3: ' + str(l.get_shape().as_list()))
-
-        for i in range(2):
-            l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                          norm=norm, b_train=b_train, use_dilation=False, scope='res_block_3_' + str(i))
-
-        # [8 x 8]
-        block_depth = block_depth * 2
-        l = layers.conv(l, scope='tr4', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm4')
-        l = act_func(l)
-
-        print('Encoder Block 4: ' + str(l.get_shape().as_list()))
-
-        for i in range(2):
-            l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                          norm=norm, b_train=b_train, use_dilation=False, scope='res_block_4_' + str(i))
-
-        # [4 x 4]
-        block_depth = block_depth * 2
-        l = layers.conv(l, scope='tr5', filter_dims=[3, 3, block_depth], stride_dims=[2, 2], non_linear_fn=None)
-        l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm5')
-        l = act_func(l)
-
-        print('Encoder Block 5: ' + str(l.get_shape().as_list()))
-
-        for i in range(2):
-            l = layers.add_residual_block(l, filter_dims=[3, 3, block_depth], num_layers=2, act_func=act_func,
-                                          norm=norm, b_train=b_train, use_dilation=False,
-                                          scope='res_block_5_' + str(i))
+            print('Encoder Bottleneck Block ' + str(i) + ': ' + str(l.get_shape().as_list()))
+            block_depth = block_depth * 2
+            l = layers.conv(l, scope='tr_' + str(i), filter_dims=[3, 3, block_depth], stride_dims=[2, 2],
+                            non_linear_fn=None)
+            l = layers.conv_normalize(l, norm=norm, b_train=b_train, scope='norm_' + str(i))
+            l = act_func(l)
 
         last_layer = l
 
-        context = layers.global_avg_pool(last_layer, output_length=representation_dim, use_bias=False, scope='gp')
+        latent = layers.global_avg_pool(last_layer, output_length=representation_dim, use_bias=False, scope='gp')
+        categories = layers.fc(latent, num_class)
 
-        print('Encoder GP Dims: ' + str(context.get_shape().as_list()))
+        print('Encoder Latent Dims: ' + str(latent.get_shape().as_list()))
 
-    return context
-
-
-def latent_discriminator(x, activation='relu', scope='latent_discriminator_network', norm='layer', b_train=False):
-    with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-        if activation == 'swish':
-            act_func = util.swish
-        elif activation == 'relu':
-            act_func = tf.nn.relu
-        elif activation == 'lrelu':
-            act_func = tf.nn.leaky_relu
-        else:
-            act_func = tf.nn.sigmoid
-
-        print('Latent Discriminator Input: ' + str(x.get_shape().as_list()))
-
-        l = x
-        l = layers.fc(l, l.get_shape().as_list()[-1] // 2, non_linear_fn=act_func, scope='flat1')
-        print('Latent Discriminator layer 1: ' + str(l.get_shape().as_list()))
-        #l = layers.layer_norm(l, scope='ln0')
-
-        feature = layers.fc(l, l.get_shape().as_list()[-1] // 4, non_linear_fn=act_func, scope='flat2')
-        print('Latent Discriminator Feature: ' + str(feature.get_shape().as_list()))
-        logit = layers.fc(feature, 1, non_linear_fn=None, scope='final')
-
-    return feature, logit
+    return latent, categories
 
 
 def get_feature_matching_loss(value, target, type='l1', gamma=1.0):
@@ -282,7 +233,7 @@ def get_feature_matching_loss(value, target, type='l1', gamma=1.0):
         loss = tf.reduce_mean(tf.abs(tf.subtract(target, value)))
     elif type == 'l2':
         loss = tf.reduce_mean(tf.square(tf.subtract(target, value)))
-        #loss = tf.reduce_mean(tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(target, value)))))
+
     return gamma * loss
 
 
@@ -312,28 +263,17 @@ def get_discriminator_loss(real, fake, type='wgan', gamma=1.0):
 def get_residual_loss(value, target, type='l1', gamma=1.0):
     if type == 'rmse':
         loss = tf.sqrt(tf.reduce_mean(tf.square(tf.subtract(target, value))))
-    elif type == 'cross-entropy':
+    elif type == 'ce':
         eps = 1e-10
         loss = tf.reduce_mean(-1 * target * tf.log(value + eps) - 1 * (1 - target) * tf.log(1 - value + eps))
     elif type == 'l1':
-        #loss = tf.reduce_mean(tf.reduce_sum(tf.abs(tf.subtract(target, value)), [1]))
         loss = tf.reduce_mean(tf.abs(tf.subtract(target, value)))
     elif type == 'l2':
-        #loss = tf.reduce_mean(tf.reduce_sum(tf.square(tf.subtract(target, value)), [1]))
         loss = tf.reduce_mean(tf.square(tf.subtract(target, value)))
 
     loss = gamma * loss
 
     return loss
-
-
-def get_diff_loss(anchor, positive, negative):
-    a_p = get_residual_loss(anchor, positive, 'l1')
-    a_n = get_residual_loss(anchor, negative, 'l1')
-    # a_n > a_p + margin
-    # a_p - a_n + margin < 0
-    # minimize (a_p - a_n + margin)
-    return tf.reduce_mean(a_p / a_n)
 
 
 def get_gradient_loss(img1, img2):
@@ -359,118 +299,116 @@ def get_gradient_loss(img1, img2):
     return (loss1+loss2)
 
 
-def generate_sample_z(low, high, num_samples, sample_length, b_uniform=True):
-    samples = []
-
-    for i in range(num_samples):
-        if b_uniform is True:
-            noise = np.random.uniform(low=low, high=high, size=[sample_length])
-        else:
-            noise = np.random.normal(low, high, size=[sample_length])
-        samples.append(noise)
-
-    return np.array(samples)
-
-
-def make_multi_modal_noise(num_mode=8):
-    size = representation_dim // num_mode
-
-    noise = tf.random_normal(shape=[batch_size, size], mean=0.0, stddev=1.0, dtype=tf.float32)
-
-    for i in range(num_mode-1):
-        n = tf.random_normal(shape=[batch_size, size], mean=0.0, stddev=1.0, dtype=tf.float32)
-        noise = tf.concat([noise, n], axis=1)
+def generate_sample_z(num_samples, sample_length):
+    noise = np.random.randn(num_samples * sample_length)
+    noise = noise.reshape((num_samples, sample_length))
 
     return noise
 
 
-def train_encoder(model_path):
+def train_encoder(model_path, gan_model_path):
     print('Please wait. It takes several minutes. Do not quit!')
 
     with tf.device('/device:CPU:0'):
         X = tf.placeholder(tf.float32, [batch_size, input_height, input_width, num_channel])
-
-    b_train = tf.placeholder(tf.bool)
+        C = tf.placeholder(tf.float32, [batch_size, num_class])
+        LR = tf.placeholder(tf.float32, None)  # Learning Rate
+        b_train = tf.placeholder(tf.bool)
 
     # Launch the graph in a session
     config = tf.ConfigProto(allow_soft_placement=True)
     config.gpu_options.allow_growth = True
 
-    latent = encoder(X, activation='relu', norm='instance', b_train=b_train, scope='encoder')
-    fake_X = generator(latent, activation='relu', norm='instance', b_train=b_train, scope='generator',
-                       use_upsample=True)
-    # Adversarial Discriminator
-    feature_fake, logit_fake = discriminator(fake_X, activation='swish', norm='instance', b_train=b_train,
-                                             scope='discriminator', use_patch=False)
-    feature_real, logit_real = discriminator(X, activation='swish', norm='instance', b_train=b_train,
-                                             scope='discriminator', use_patch=False)
+    latent, category = encoder(X, activation='lrelu', norm='instance', b_train=b_train, scope='encoder')
+    fake_X = generator(latent, C, activation='relu', norm='batch', b_train=b_train, scope='generator')
+
+    feature_fake, logit_fake = discriminator(fake_X, C, activation='lrelu', norm='instance', b_train=b_train,
+                                             scope='discriminator')
+    feature_real, logit_real = discriminator(X, C, activation='lrelu', norm='instance', b_train=b_train,
+                                             scope='discriminator')
 
     feature_loss = get_residual_loss(feature_real, feature_fake, type='l2')
-    encoder_loss = get_residual_loss(X, fake_X, type='l2')
+    encoder_loss = get_residual_loss(X, fake_X, type='l1')
+    class_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=C, logits=category))
     encoder_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='encoder')
 
     alpha = 1.0
-    total_loss = encoder_loss + alpha * feature_loss
+    weight_decay = 1e-5
+    l2_regularizer = tf.add_n([tf.nn.l2_loss(v) for v in encoder_vars if 'bias' not in v.name])
+    total_loss = encoder_loss + class_loss + weight_decay * l2_regularizer + alpha * feature_loss
 
-    encoder_optimizer = tf.train.AdamOptimizer(learning_rate=1e-4, beta1=0.5).minimize(total_loss, var_list=[encoder_vars])
+    encoder_optimizer = tf.train.RMSPropOptimizer(learning_rate=LR).minimize(total_loss, var_list=encoder_vars)
+
+    disc_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='discriminator')
+    generator_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='generator')
 
     # Launch the graph in a session
     with tf.Session(config=config) as sess:
         sess.run(tf.global_variables_initializer())
 
+        gan_variables_to_restore = disc_vars + generator_vars
+        encoder_variables_to_restore = encoder_vars
+
         try:
-            saver = tf.train.Saver()
-            saver.restore(sess, model_path)
+            encoder_saver = tf.train.Saver(encoder_variables_to_restore)
+            encoder_saver.restore(sess, model_path)
+            gan_saver = tf.train.Saver(var_list=gan_variables_to_restore)
+            gan_saver.restore(sess, gan_model_path)
+
             print('Model Restored')
         except:
             try:
-                variables_to_restore = [v for v in tf.trainable_variables()
-                                        if v.name.split('/')[0] == 'generator'
-                                        or v.name.split('/')[0] == 'discriminator']
-                saver = tf.train.Saver(variables_to_restore)
+                gan_saver = tf.train.Saver(var_list=gan_variables_to_restore)
+                gan_saver.restore(sess, gan_model_path)
                 print('Start New Training. Wait ...')
             except:
                 print('Model load failed. No Pretrained GAN.')
                 return
 
-        trX = os.listdir(train_data)
+        file_list, classes = prepare_samples(train_data, num_samples_per_class)
+        trX = file_list
+
         print('Number of Training Images: ' + str(len(trX)))
-        num_augmentations = 1  # How many augmentations per 1 sample
-        file_batch_size = batch_size // num_augmentations
+        total_input_size = len(trX) // batch_size
+        total_steps = (total_input_size * num_epoch)
+        learning_rate = 2e-4
+        category_index = np.eye(num_class)[np.arange(num_class)]
 
         for e in range(num_epoch):
-            trX = shuffle(trX)
-            training_batch = zip(range(0, len(trX), file_batch_size),
-                                 range(file_batch_size, len(trX) + 1, file_batch_size))
+            trX, classes = shuffle(trX, classes)
+            training_batch = zip(range(0, len(trX), batch_size),
+                                 range(batch_size, len(trX) + 1, batch_size))
             itr = 0
 
             for start, end in training_batch:
-                imgs = load_images(trX[start:end], base_dir=train_data, use_augmentation=False)
-                #imgs = np.expand_dims(imgs, axis=3)
+                imgs = load_images(trX[start:end], base_dir=train_data, b_grayscale=use_gray_scale)
+                categories = category_index[classes[start:end]]
+                cur_steps = (e * total_input_size) + itr + 1.0
+                lr = learning_rate * np.cos((np.pi * 7 / 16) * (cur_steps / total_steps))
 
-                _, e_loss, decoded_images = sess.run([encoder_optimizer, total_loss, fake_X], feed_dict={X: imgs, b_train: True})
+                _, e_loss, c_loss, f_loss, decoded_images = sess.run([encoder_optimizer, encoder_loss, class_loss, feature_loss, fake_X],
+                                                                     feed_dict={X: imgs, C: categories, b_train: True, LR: lr})
 
-                print('epoch: ' + str(e) + ', loss: ' + str(e_loss))
+                print('epoch: ' + str(e) + ', e loss: ' + str(e_loss) + ', c loss: ' + str(c_loss) + ', f loss: ' + str(f_loss))
 
                 decoded_images = np.squeeze(decoded_images)
-                cv2.imwrite('imgs/' + trX[start], decoded_images[3] * 255)
-                # cv2.imwrite('imgs/org_' + trX[start], imgs[3] * 255)
+                for i in range(batch_size):
+                    cv2.imwrite('samples_encoder/' + trX[start+i], decoded_images[i] * 255)
 
                 itr += 1
 
                 if itr % 200 == 0:
                     try:
                         print('Saving model...')
+                        saver = tf.train.Saver(encoder_vars)
                         saver.save(sess, model_path)
                         print('Saved.')
                     except:
                         print('Save failed')
 
-                if is_exit() is True:
-                    return
-
             try:
                 print('Saving model...')
+                saver = tf.train.Saver(encoder_vars)
                 saver.save(sess, model_path)
                 print('Saved.')
             except:
@@ -485,47 +423,38 @@ def train_gan(model_path):
         Z = tf.placeholder(tf.float32, [batch_size, representation_dim])
         C = tf.placeholder(tf.float32, [batch_size, num_class])
         LR = tf.placeholder(tf.float32, None)  # Learning Rate
-
-    b_train = tf.placeholder(tf.bool)
+        b_train = tf.placeholder(tf.bool)
 
     # Launch the graph in a session
     config = tf.ConfigProto(allow_soft_placement=True)
     config.gpu_options.allow_growth = True
 
     # Content discriminator
-    fake_X = generator(Z, C, activation='relu', norm='instance', b_train=b_train, scope='generator', use_upsample=True)
+    fake_X = generator(Z, C, activation='relu', norm='batch', b_train=b_train, scope='generator')
     augmented_fake_X = util.random_augments(fake_X)
 
     # Adversarial Discriminator
     augmented_X = util.random_augments(X)
-    feature_real, logit_real = discriminator(augmented_X, C, activation='relu', norm='instance', b_train=b_train, scope='discriminator')
-    feature_fake, logit_fake = discriminator(augmented_fake_X, C, activation='relu', norm='instance', b_train=b_train, scope='discriminator')
+    feature_real, logit_real = discriminator(augmented_X, C, activation='lrelu', norm='instance', b_train=b_train, scope='discriminator')
+    feature_fake, logit_fake = discriminator(augmented_fake_X, C, activation='lrelu', norm='instance', b_train=b_train, scope='discriminator')
 
     grad_loss = get_gradient_loss(X, fake_X)
     feature_loss = get_feature_matching_loss(feature_real, feature_fake, type='l2')
 
-    #disc_loss, disc_loss_real, disc_loss_fake = get_discriminator_loss(logit_real, logit_fake, type='wgan')
-    disc_loss = get_discriminator_loss(logit_real, tf.ones_like(logit_real), type='ls') + \
+    label_smooth_real = tf.ones_like(logit_real) - 0.3 + tf.random_uniform([], minval=0.0, maxval=1.0, dtype=tf.float32) * 0.5
+    disc_loss = get_discriminator_loss(logit_real, label_smooth_real, type='ls') + \
                 get_discriminator_loss(logit_fake, tf.zeros_like(logit_fake), type='ls')
 
-    #gen_loss = -tf.reduce_mean(logit_fake)
-    gen_loss = get_discriminator_loss(logit_fake, tf.ones_like(logit_fake), type='ls') # + feature_loss #+ 0.1 * grad_loss
-    #gen_loss = feature_loss
-
+    gen_ls_loss = get_discriminator_loss(logit_fake, tf.ones_like(logit_fake), type='ls')
     disc_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator')
-    disc_l2_regularizer = tf.add_n([tf.nn.l2_loss(v) for v in disc_vars if 'bias' not in v.name])
-    weight_decay = 1e-5
-    disc_loss = disc_loss + weight_decay * disc_l2_regularizer
 
     generator_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='generator')
     gen_l2_regularizer = tf.add_n([tf.nn.l2_loss(v) for v in generator_vars if 'bias' not in v.name])
-    gen_loss = gen_loss + weight_decay * gen_l2_regularizer
+    weight_decay = 1e-5
+    gen_loss = gen_ls_loss
 
     disc_optimizer = tf.train.RMSPropOptimizer(learning_rate=LR).minimize(disc_loss, var_list=disc_vars)
     gen_optimizer = tf.train.RMSPropOptimizer(learning_rate=LR).minimize(gen_loss, var_list=generator_vars)
-    #disc_optimizer = tf.train.AdamOptimizer(learning_rate=LR).minimize(disc_loss, var_list=disc_vars)
-    #gen_optimizer = tf.train.AdamOptimizer(learning_rate=LR).minimize(gen_loss, var_list=generator_vars)
-    image_pool = util.ImagePool(maxsize=30, threshold=0.5)
 
     # Launch the graph in a session
     with tf.Session(config=config) as sess:
@@ -538,10 +467,13 @@ def train_gan(model_path):
         except:
             print('Start New Training. Wait ...')
 
-        trX = os.listdir(train_data)
+        file_list, classes = prepare_samples(train_data, num_samples_per_class)
+
+        trX = file_list
+
         print('Number of Training Images: ' + str(len(trX)))
-        num_augmentations = 1  # How many augmentations per 1 sample
-        file_batch_size = batch_size // num_augmentations
+
+        # How many times  Discriminator is updated per 1 Generator update.
         num_critic = 3
         learning_rate = 2e-4
 
@@ -551,22 +483,17 @@ def train_gan(model_path):
         total_steps = (total_input_size * num_epoch)
 
         for e in range(num_epoch):
-            trX = shuffle(trX)
-            training_batch = zip(range(0, len(trX), file_batch_size),  range(file_batch_size, len(trX)+1, file_batch_size))
+            trX, classes = shuffle(trX, classes)
+            training_batch = zip(range(0, len(trX), batch_size),  range(batch_size, len(trX)+1, batch_size))
             itr = 0
 
             for start, end in training_batch:
-                imgs, cats = load_images(trX[start:end], base_dir=train_data)
-                imgs = np.expand_dims(imgs, axis=-1)
-                #print(imgs.shape)
+                imgs = load_images(trX[start:end], base_dir=train_data, b_grayscale=use_gray_scale)
 
-                categories = category_index[cats]
-                noise = generate_sample_z(low=0, high=1.0, num_samples=batch_size,
-                                          sample_length=representation_dim,
-                                          b_uniform=False)
+                categories = category_index[classes[start:end]]
+                noise = generate_sample_z( num_samples=batch_size, sample_length=representation_dim)
 
                 cur_steps = (e * total_input_size) + itr + 1.0
-
                 lr = learning_rate * np.cos((np.pi * 7 / 16) * (cur_steps / total_steps))
 
                 _, d_loss = sess.run([disc_optimizer, disc_loss],
@@ -577,22 +504,27 @@ def train_gan(model_path):
                                                 b_train: True})
 
                 if itr % num_critic == 0:
+                    # Separate Batch of Generator & Discriminator
+                    noise = generate_sample_z(num_samples=batch_size, sample_length=representation_dim)
+
                     _, g_loss = sess.run([gen_optimizer, gen_loss],
                                          feed_dict={Z: noise,
                                                     X: imgs,
                                                     C: categories,
-                                                    b_train: True, LR: lr})
+                                                    LR: lr,
+                                                    b_train: True})
 
                     decoded_images = sess.run([fake_X], feed_dict={Z: noise, C: categories, b_train: True})
                     print('epoch: ' + str(e) + ', discriminator: ' + str(d_loss) +
                           ', generator: ' + str(g_loss))
 
-                    decoded_images = np.squeeze(decoded_images)
-                    #imgs = np.squeeze(imgs)
+                    decoded_images = decoded_images[0]
 
-                    for i in range(batch_size):
-                        cv2.imwrite('imgs/gen_' + trX[start+i], decoded_images[i] * 255.0)
-                        #cv2.imwrite('imgs/' + trX[start+i], imgs[i] * 255.0)
+                    if use_gray_scale is True:
+                        img = cv2.cvtColor(decoded_images[0] * 127.5 + 127.5, cv2.COLOR_GRAY2BGR)
+                    else:
+                        img = decoded_images[0] * 127.5 + 127.5
+                    cv2.imwrite(train_out_dir + '/' + str(e) + '_' + str(itr) + '_out.png', img)
 
                 itr += 1
 
@@ -604,9 +536,6 @@ def train_gan(model_path):
                     except:
                         print('Save failed')
 
-                if is_exit() is True:
-                    return
-
             try:
                 print('Saving model...')
                 saver.save(sess, model_path)
@@ -616,79 +545,52 @@ def train_gan(model_path):
 
 
 def test(model_path):
-    with tf.device('/device:CPU:0'):
-        X = tf.placeholder(tf.float32, [batch_size, input_height, input_width, num_channel])
+    print('Please wait. It takes several minutes. Do not quit!')
 
-    b_train = tf.placeholder(tf.bool)
+    with tf.device('/device:CPU:0'):
+        Z = tf.placeholder(tf.float32, [batch_size, representation_dim])
+        C = tf.placeholder(tf.float32, [batch_size, num_class])
+        b_train = tf.placeholder(tf.bool)
 
     # Launch the graph in a session
     config = tf.ConfigProto(allow_soft_placement=True)
     config.gpu_options.allow_growth = True
 
-    latent = encoder(X, activation='swish', norm='layer', b_train=b_train, scope='encoder')
-    fake_X = generator(latent, activation='swish', norm='layer', b_train=b_train, scope='generator',
-                       use_upsample=True)
-    # Adversarial Discriminator
-    feature_fake, logit_fake = discriminator(fake_X, activation='swish', norm='layer', b_train=b_train,
-                                             scope='discriminator', use_patch=False)
-    feature_real, logit_real = discriminator(X, activation='swish', norm='layer', b_train=b_train,
-                                             scope='discriminator', use_patch=False)
-
-    feature_loss = get_residual_loss(feature_real, feature_fake, type='l2')
-    encoder_loss = get_residual_loss(X, fake_X, type='l1')
-    encoder_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='encoder')
-
-    alpha = 1.0
-    total_loss = encoder_loss + alpha * feature_loss
+    # Content discriminator
+    fake_X = generator(Z, C, activation='relu', norm='batch', b_train=b_train, scope='generator')
+    generator_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='generator')
 
     # Launch the graph in a session
     with tf.Session(config=config) as sess:
         sess.run(tf.global_variables_initializer())
 
         try:
-            saver = tf.train.Saver()
+            saver = tf.train.Saver(var_list=generator_vars)
             saver.restore(sess, model_path)
             print('Model Restored')
         except:
-            print('Model Restore Failed')
-            return
+            print('Start New Training. Wait ...')
 
-        trX = os.listdir(test_data)
-        print('Number of Test Images: ' + str(len(trX)))
-        file_batch_size = 1
-        training_batch = zip(range(0, len(trX), file_batch_size),  range(file_batch_size, len(trX)+1, file_batch_size))
+        category_index = np.eye(num_class)[np.arange(num_class)]
 
-        for start, end in training_batch:
-            imgs = load_images(trX[start:end], base_dir=test_data)
-            #imgs = np.expand_dims(imgs, axis=3)
-            #print('Image batch Shape: ' + str(imgs.shape))
-            aae_loss = sess.run([total_loss], feed_dict={X: imgs, b_train: False})
+        num_itr = num_test_output // batch_size
+        for i in range(num_class):
+            cls = [i] * batch_size
+            categories = category_index[cls]
 
-            print(str(trX[start:end]) + ' score: ' + str(aae_loss))
+            for j in range(num_itr):
+                noise = generate_sample_z(num_samples=batch_size, sample_length=representation_dim)
+                decoded_images = sess.run([fake_X], feed_dict={Z: noise, C: categories, b_train: False})
 
+                decoded_images = decoded_images[0]
 
-def findCosineDistance(source_representation, test_representation):
-    a = np.matmul(np.transpose(source_representation), test_representation)
-    b = np.sum(np.multiply(source_representation, source_representation))
-    c = np.sum(np.multiply(test_representation, test_representation))
-    return 1 - (a / (np.sqrt(b) * np.sqrt(c)))
+                for k in range(batch_size):
+                    if use_gray_scale is True:
+                        img = cv2.cvtColor(decoded_images[k] * 127.5 + 127.5, cv2.COLOR_GRAY2BGR)
+                    else:
+                        img = decoded_images[k] * 127.5 + 127.5
 
-
-def findEuclideanDistance(source_representation, test_representation):
-    euclidean_distance = source_representation - test_representation
-    euclidean_distance = np.sum(np.multiply(euclidean_distance, euclidean_distance))
-    euclidean_distance = np.sqrt(euclidean_distance)
-    return euclidean_distance
-
-
-def is_exit(marker='.exit'):
-    import os.path
-
-    if os.path.isfile(marker) is True:
-        os.remove(marker)
-        return True
-
-    return False
+                    cv2.imwrite(test_out_dir + '/' + str(i) + '_' + str(j) + '_' + str(k) + '.png', img)
 
 
 if __name__ == '__main__':
@@ -696,39 +598,45 @@ if __name__ == '__main__':
 
     parser.add_argument('--mode', type=str, help='train_gan/train_encoder/test', default='train_gan')
     parser.add_argument('--model_path', type=str, help='model check point file path', default='./model/m.ckpt')
-    parser.add_argument('--train_data', type=str, help='training data directory', default='input')
-    parser.add_argument('--test_data', type=str, help='test data directory', default='test')
+    parser.add_argument('--gan_model_path', type=str, help='gan model check point file path', default='./model_gan/m.ckpt')
+    parser.add_argument('--train_data', type=str, help='training data directory', default='data')
+    parser.add_argument('--train_out_dir', type=str, help='train output directory', default='train_out')
+    parser.add_argument('--test_out_dir', type=str, help='test output directory', default='test_out')
 
     args = parser.parse_args()
 
     train_data = args.train_data
-    test_data = args.test_data
+    train_out_dir = args.train_out_dir
+    test_out_dir = args.test_out_dir
     model_path = args.model_path
+    gan_model_path = args.gan_model_path
 
+    # Source image size
     img_width = 128
     img_height = 128
+    # Network input size
     input_width = 96
     input_height = 96
-    num_channel = 1
+    num_channel = 3
+    use_gray_scale = True
+    num_samples_per_class = 744
 
-    unit_block_depth = 64
-    dense_block_depth = 32
+    if use_gray_scale is True:
+        num_channel = 1
 
-    # Bottle neck(depth narrow down) depth. See Residual Dense Block and Residual Block.
-    bottleneck_depth = 12
-    batch_size = 32
-    representation_dim = 1024
-
-    test_size = 100
-    num_epoch = 300000
-    num_class = 9
+    # Network Configurations
+    unit_block_depth = 32
+    bottleneck_depth = 8
+    batch_size = 64
+    representation_dim = 128
+    num_epoch = 10000
+    num_class = 12
 
     if args.mode == 'train_gan':
         train_gan(model_path)
     elif args.mode == 'train_encoder':
-        train_encoder(model_path)
-    else:
-        model_path = args.model_path
-        test_data = args.test_data
-        batch_size = 1
+        train_encoder(model_path, gan_model_path)
+    elif args.mode == 'test_gan':
+        batch_size = 64
+        num_test_output = batch_size * 2
         test(model_path)

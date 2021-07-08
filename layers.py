@@ -101,15 +101,15 @@ def fc(input_data, out_dim, non_linear_fn=None, initial_value=None, use_bias=Tru
         return activation
 
 
-def batch_norm(x, b_train, scope, reuse=False):
-    with tf.variable_scope(scope,  reuse=tf.AUTO_REUSE):
+def batch_norm(x, b_train, scope, decay=0.999, epsilon=1e-3):
+    with tf.variable_scope(scope):
         n_out = x.get_shape().as_list()[-1]
 
         beta = tf.get_variable('beta', initializer=tf.constant(0.0, shape=[n_out]))
         gamma = tf.get_variable('gamma', initializer=tf.constant(1.0, shape=[n_out]))
 
         batch_mean, batch_var = tf.nn.moments(x, [0], name='moments')
-        ema = tf.train.ExponentialMovingAverage(decay=0.9)
+        ema = tf.train.ExponentialMovingAverage(decay=decay)
 
         def mean_var_with_update():
             ema_apply_op = ema.apply([batch_mean, batch_var])
@@ -119,7 +119,7 @@ def batch_norm(x, b_train, scope, reuse=False):
         mean, var = tf.cond(b_train,
                             mean_var_with_update,
                             lambda: (ema.average(batch_mean), ema.average(batch_var)))
-        normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
+        normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, epsilon)
 
         return normed
 
@@ -205,7 +205,7 @@ def conv(input, scope, filter_dims, stride_dims, padding='SAME',
         return activation
 
 
-def batch_norm_conv(x, b_train, scope):
+def batch_norm_conv(x, b_train, scope, decay=0.999, epsilon=1e-3):
     with tf.variable_scope(scope):
         n_out = x.get_shape().as_list()[-1]
 
@@ -213,7 +213,7 @@ def batch_norm_conv(x, b_train, scope):
         gamma = tf.get_variable('gamma', initializer=tf.constant(1.0, shape=[n_out]))
 
         batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2], name='moments')
-        ema = tf.train.ExponentialMovingAverage(decay=0.9)
+        ema = tf.train.ExponentialMovingAverage(decay=decay)
 
         def mean_var_with_update():
             ema_apply_op = ema.apply([batch_mean, batch_var])
@@ -223,7 +223,7 @@ def batch_norm_conv(x, b_train, scope):
         mean, var = tf.cond(b_train,
                             mean_var_with_update,
                             lambda: (ema.average(batch_mean), ema.average(batch_var)))
-        normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, 1e-3)
+        normed = tf.nn.batch_normalization(x, mean, var, beta, gamma, epsilon)
 
         return normed
 

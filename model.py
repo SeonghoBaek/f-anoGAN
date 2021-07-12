@@ -330,7 +330,7 @@ def train_encoder(model_path, gan_model_path):
     feature_loss = get_residual_loss(feature_real, feature_fake, type='l2')
     encoder_loss = get_residual_loss(X, fake_X, type='l1')
     class_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=C, logits=category))
-    encoder_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='encoder')
+    encoder_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='encoder')
 
     alpha = 1.0
     weight_decay = 1e-5
@@ -350,7 +350,7 @@ def train_encoder(model_path, gan_model_path):
         encoder_variables_to_restore = encoder_vars
 
         try:
-            encoder_saver = tf.train.Saver(encoder_variables_to_restore)
+            encoder_saver = tf.train.Saver(var_list=encoder_variables_to_restore)
             encoder_saver.restore(sess, model_path)
             gan_saver = tf.train.Saver(var_list=gan_variables_to_restore)
             gan_saver.restore(sess, gan_model_path)
@@ -391,9 +391,12 @@ def train_encoder(model_path, gan_model_path):
 
                 print('epoch: ' + str(e) + ', e loss: ' + str(e_loss) + ', c loss: ' + str(c_loss) + ', f loss: ' + str(f_loss))
 
-                decoded_images = np.squeeze(decoded_images)
                 for i in range(batch_size):
-                    cv2.imwrite('samples_encoder/' + trX[start+i], decoded_images[i] * 255)
+                    if use_gray_scale is True:
+                        img = cv2.cvtColor(decoded_images[i] * 127.5 + 127.5, cv2.COLOR_GRAY2BGR)
+                    else:
+                        img = decoded_images[i] * 127.5 + 127.5
+                    cv2.imwrite('samples_encoder/' + trX[start + i], img)
 
                 itr += 1
 
@@ -524,7 +527,7 @@ def train_gan(model_path):
                         img = cv2.cvtColor(decoded_images[0] * 127.5 + 127.5, cv2.COLOR_GRAY2BGR)
                     else:
                         img = decoded_images[0] * 127.5 + 127.5
-                    cv2.imwrite(train_out_dir + '/' + str(e) + '_' + str(itr) + '_out.png', img)
+                    cv2.imwrite(train_out_dir + '/' + str(itr) + '_out.png', img)
 
                 itr += 1
 

@@ -582,9 +582,14 @@ def test(model_path):
             categories = category_index[cls]
 
             for j in range(num_itr):
-                noise = generate_sample_z(num_samples=batch_size, sample_length=representation_dim)
-                decoded_images = sess.run([fake_X], feed_dict={Z: noise, C: categories, b_train: False})
+                noise = generate_sample_z(num_samples=num_points, sample_length=representation_dim)
+                latents = []
 
+                for k in range(0, num_points, 2):
+                    latents.append(util.interpolate_points(noise[k], noise[k+1], n_steps=num_interpolates))
+
+                latents = np.reshape(latents, [-1, 128])
+                decoded_images = sess.run([fake_X], feed_dict={Z: latents, C: categories, b_train: False})
                 decoded_images = decoded_images[0]
 
                 for k in range(batch_size):
@@ -641,5 +646,7 @@ if __name__ == '__main__':
         train_encoder(model_path, gan_model_path)
     elif args.mode == 'test_gan':
         batch_size = 64
+        num_points = 32
+        num_interpolates = 4
         num_test_output = batch_size * 2
         test(model_path)

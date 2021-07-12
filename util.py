@@ -924,3 +924,24 @@ def findEuclideanDistance(source_representation, test_representation):
     euclidean_distance = np.sum(np.multiply(euclidean_distance, euclidean_distance))
     euclidean_distance = np.sqrt(euclidean_distance)
     return euclidean_distance
+
+
+# Spherical linear interpolation. low, high are samples are drawn under random normal distribution.
+def slerp(val, low, high):
+    omega = np.arccos(np.clip(np.dot(low/np.linalg.norm(low), high/np.linalg.norm(high)), -1, 1))
+    so = np.sin(omega)
+    if so == 0:
+        return (1.0 - val) * low + val * high
+
+    return np.sin((1.0 - val) * omega) / so * low + np.sin(val * omega) / so * high
+
+
+def interpolate_points(p1, p2, n_steps=10):
+    ratios = np.linspace(0, 1, num=n_steps)
+    vectors = list()
+
+    for ratio in ratios:
+        v = slerp(ratio, p1, p2)
+        vectors.append(v)
+
+    return vectors

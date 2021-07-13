@@ -62,7 +62,7 @@ def load_images(file_name_list, base_dir, b_grayscale=False):
             offset = input_width // 2
             # Center crop
             center_x = img_width // 2
-            center_y = img_height // 2 + 4
+            center_y = img_height // 2
             img = img[center_y - offset:center_y + offset, center_x - offset:center_x + offset]
             img = img * 1.0
             n_img = (img - 127.5) / 127.5

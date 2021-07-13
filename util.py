@@ -721,7 +721,7 @@ def random_adjust_brightness(image,
         tf.greater(random_prob, probability), lambda: image,
         functools.partial(tf.image.adjust_brightness, image=image, delta=delta))
 
-    image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0)
+    image = tf.clip_by_value(image, clip_value_min=-1.0, clip_value_max=1.0)
 
     return image
 
@@ -756,7 +756,7 @@ def random_adjust_contrast(image,
         image = tf.cond(
             tf.greater(random_prob, probability), lambda: image,
             functools.partial(tf.image.adjust_contrast, images=image, contrast_factor=contrast_factor))
-        image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0)
+        image = tf.clip_by_value(image, clip_value_min=-1.0, clip_value_max=1.0)
 
     return image
 
